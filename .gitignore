@@ -1,0 +1,9 @@
+dist/
+build/
+*.spec
+*.exe
+*.dll
+pycache/
+*.pyc
+.idea/
+.venv/
