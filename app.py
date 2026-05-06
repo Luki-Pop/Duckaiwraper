@@ -12,7 +12,7 @@ from PyQt6.QtCore import Qt, QCoreApplication
 def main() -> int:
     """Create the Qt application, show the main window, and start the event loop."""
     # Enable high‑DPI scaling on modern monitors (optional but nice)
-    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
+    #QCoreApplication.setAttribute(Qt.ApplicationAttribute.UseHighDpiPixmaps)
 
     app = QtWidgets.QApplication(sys.argv)
 
