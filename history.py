@@ -1,10 +1,7 @@
-import os
-import sqlite3
-import uuid
+import sqlite3, uuid
 from datetime import datetime
-from typing import List, Optional
 from dataclasses import dataclass
-
+from typing import List, Optional
 
 @dataclass
 class ChatMessage:
@@ -12,19 +9,14 @@ class ChatMessage:
     content: str
     timestamp: datetime
 
-
 class HistoryDB:
-    """Thin wrapper around a local SQLite file that stores sessions & messages."""
-
-    def __init__(self, db_path: str = "duckai_history.db", max_history: Optional[int] = None):
+    """Very small SQLite wrapper that stores sessions and their messages."""
+    def __init__(self, db_path: str = "chat_history.db", max_history: Optional[int] = None):
         self.db_path = db_path
         self.max_history = max_history
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._ensure_schema()
 
-    # ------------------------------------------------------------------ #
-    # Schema creation
-    # ------------------------------------------------------------------ #
     def _ensure_schema(self) -> None:
         cur = self.conn.cursor()
         cur.executescript(
@@ -45,15 +37,13 @@ class HistoryDB:
         )
         self.conn.commit()
 
-    # ------------------------------------------------------------------ #
-    # Session helpers
-    # ------------------------------------------------------------------ #
+    # ---------- session helpers ----------
     def new_session(self) -> str:
-        session_id = str(uuid.uuid4())
+        sid = str(uuid.uuid4())
         cur = self.conn.cursor()
-        cur.execute("INSERT INTO sessions (session_id) VALUES (?)", (session_id,))
+        cur.execute("INSERT INTO sessions (session_id) VALUES (?)", (sid,))
         self.conn.commit()
-        return session_id
+        return sid
 
     def list_sessions(self) -> List[str]:
         cur = self.conn.cursor()
@@ -66,9 +56,7 @@ class HistoryDB:
         cur.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         self.conn.commit()
 
-    # ------------------------------------------------------------------ #
-    # Message helpers
-    # ------------------------------------------------------------------ #
+    # ---------- message helpers ----------
     def add_message(self, session_id: str, role: str, content: str) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -78,7 +66,6 @@ class HistoryDB:
         self.conn.commit()
 
         if self.max_history:
-            # Keep only the newest `max_history` rows per session
             cur.execute(
                 """
                 DELETE FROM messages
@@ -106,13 +93,10 @@ class HistoryDB:
         )
         rows = cur.fetchall()
         return [
-            ChatMessage(role=row[0], content=row[1],
-                        timestamp=datetime.fromisoformat(row[2]))
-            for row in rows
+            ChatMessage(role=r[0], content=r[1],
+                         timestamp=datetime.fromisoformat(r[2]))
+            for r in rows
         ]
 
-    # ------------------------------------------------------------------ #
-    # Clean‑up
-    # ------------------------------------------------------------------ #
     def close(self) -> None:
         self.conn.close()
