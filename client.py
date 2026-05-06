@@ -1,142 +1,108 @@
-# duckaiwrapper/client.py
-import os
-import httpx
-from typing import Optional, Generator, List
+# duckai/client.py
+import json
+import requests
+from typing import Optional, List
+
 from .history import HistoryDB, ChatMessage
 
-
-class AuthError(Exception):
-    pass
+API_URL = "https://duckduckgo.com/ai/api"   # whatever endpoint the repo uses
 
 
-class DuckAIError(Exception):
-    pass
-
-
-class Response:
-    """Simple wrapper returned by query methods."""
-    def __init__(self, text: str, session_id: str):
-        self.text = text
-        self.session_id = session_id
-
-    def __repr__(self):
-        return f"<DuckAIResponse session={self.session_id!r} text={self.text[:30]!r}...>"
-
-
-class DuckAIClient:
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
+class DuckAI:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        db_path: str = "duckai_history.db",
+        system_prompt: Optional[str] = None,
+        history_db: Optional[HistoryDB] = None,
+        session_id: Optional[str] = None,
         max_history: Optional[int] = None,
     ):
-        self.api_key = api_key or os.getenv("DUCKAI_API_KEY")
-        if not self.api_key:
-            raise AuthError("DuckAI API key missing")
-        self.base_url = "https://api.duck.ai/v1/chat"
-        self.headers = {"Authorization": f"Bearer {self.api_key}"}
-        self.history = HistoryDB(db_path=db_path, max_history=max_history)
+        """
+        Parameters
+        ----------
+        api_key: optional token for the DuckAI endpoint.
+        system_prompt: optional system‑level instruction.
+        history_db: a HistoryDB instance – if omitted a new one with default
+                    `chat_history.db` is created.
+        session_id: if supplied the client will use that session; otherwise a
+                    new session is created on‑the‑fly.
+        max_history: pass-through to HistoryDB – caps the number of stored
+                     messages per session.
+        """
+        self.api_key = api_key
+        self.system_prompt = system_prompt
+
+        # ------------------------------------------------------------------
+        # Initialise the persistence layer
+        # ------------------------------------------------------------------
+        self.history = history_db or HistoryDB(max_history=max_history)
+        self.session_id = session_id or self.history.new_session()
 
     # ------------------------------------------------------------------
-    # Session management (public API)
+    # Payload construction – historic messages become context
     # ------------------------------------------------------------------
-    def start_session(self) -> str:
-        """Create a fresh session and return its UUID."""
-        return self.history.new_session()
+    def _build_payload(self, user_prompt: str) -> dict:
+        # 1️⃣ Load historic messages for this session
+        historic: List[ChatMessage] = self.history.load_history(self.session_id)
 
+        # 2️⃣ Convert them to the API’s message format
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+
+        for msg in historic:
+            messages.append({"role": msg.role, "content": msg.content})
+
+        # 3️⃣ Append the fresh user query
+        messages.append({"role": "user", "content": user_prompt})
+
+        return {"messages": messages}
+
+    # ------------------------------------------------------------------
+    # Low‑level HTTP call
+    # ------------------------------------------------------------------
+    def _post(self, payload: dict) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # Public chat method – stores the turn afterwards
+    # ------------------------------------------------------------------
+    def chat(self, user_prompt: str) -> str:
+        payload = self._build_payload(user_prompt)
+        response = self._post(payload)
+
+        # Expected shape: {"choices":[{"message":{"content":"..."} }]}
+        assistant_reply = response["choices"][0]["message"]["content"]
+
+        # 4️⃣ Persist both sides of the turn
+        self.history.add_message(self.session_id, "user", user_prompt)
+        self.history.add_message(self.session_id, "assistant", assistant_reply)
+
+        return assistant_reply
+
+    # ------------------------------------------------------------------
+    # Convenience helpers
+    # ------------------------------------------------------------------
     def list_sessions(self) -> List[str]:
         return self.history.list_sessions()
 
-    def delete_session(self, session_id: str) -> None:
-        self.history.delete_session(session_id)
+    def switch_session(self, session_id: str) -> None:
+        """Swap to an existing session; raises if the id does not exist."""
+        if session_id not in self.list_sessions():
+            raise ValueError(f"Session {session_id!r} not found")
+        self.session_id = session_id
 
-    # ------------------------------------------------------------------
-    # Core query methods (synchronous, asynchronous, streaming)
-    # ------------------------------------------------------------------
-    def _build_payload(self, prompt: str, session_id: str) -> dict:
-        """Assemble the full message list (history + new user prompt)."""
-        past: List[ChatMessage] = self.history.load_history(session_id)
-        messages = [{"role": m.role, "content": m.content} for m in past]
-        messages.append({"role": "user", "content": prompt})
-        return {"messages": messages}
+    def reset_current_session(self) -> None:
+        """Delete all messages in the active session but keep the session row."""
+        self.history.delete_session(self.session_id)
+        # Re‑create the empty session entry so the id stays usable
+        self.history.new_session()   # creates a brand‑new uuid
+        self.session_id = self.history.list_sessions()[0]
 
-    def query(self, prompt: str, session_id: Optional[str] = None) -> Response:
-        """Blocking request – returns a full answer."""
-        if session_id is None:
-            session_id = self.start_session()
-
-        payload = self._build_payload(prompt, session_id)
-
-        resp = httpx.post(
-            self.base_url,
-            json=payload,
-            headers=self.headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        answer = data["choices"][0]["message"]["content"]
-
-        # Persist the exchange
-        self.history.add_message(session_id, "user", prompt)
-        self.history.add_message(session_id, "assistant", answer)
-
-        return Response(text=answer, session_id=session_id)
-
-    async def query_async(self, prompt: str, session_id: Optional[str] = None) -> Response:
-        """Async version – useful inside an event loop."""
-        if session_id is None:
-            session_id = self.start_session()
-
-        payload = self._build_payload(prompt, session_id)
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                self.base_url,
-                json=payload,
-                headers=self.headers,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            answer = data["choices"][0]["message"]["content"]
-
-        self.history.add_message(session_id, "user", prompt)
-        self.history.add_message(session_id, "assistant", answer)
-
-        return Response(text=answer, session_id=session_id)
-
-    def stream(self, prompt: str, session_id: Optional[str] = None) -> Generator[str, None, None]:
-        """Yield partial tokens as they arrive (synchronous streaming)."""
-        if session_id is None:
-            session_id = self.start_session()
-
-        payload = self._build_payload(prompt, session_id)
-        payload["stream"] = True
-
-        with httpx.StreamingClient() as client:
-            with client.stream(
-                "POST",
-                self.base_url,
-                json=payload,
-                headers=self.headers,
-            ) as response:
-                response.raise_for_status()
-                full_reply = ""
-                for chunk in response.iter_text():
-                    full_reply += chunk
-                    yield chunk
-
-        # Store after the whole response has been received
-        self.history.add_message(session_id, "user", prompt)
-        self.history.add_message(session_id, "assistant", full_reply)
-
-    # ------------------------------------------------------------------
-    # Clean‑up
-    # ------------------------------------------------------------------
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
         self.history.close()
