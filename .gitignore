@@ -7,3 +7,4 @@ pycache/
 *.pyc
 .idea/
 .venv/
+chat_history.db
